@@ -16,10 +16,6 @@
 #include <unistd.h>
 #endif
 
-#ifndef NO_GRAPHICS
-#include "SDL.h"
-#endif
-
 // Emulator system constants
 #define IO_PORT_COUNT 0x10000
 #define RAM_SIZE 0x10FFF0
@@ -234,15 +230,6 @@ int op_result, disk[3], scratch_int;
 time_t clock_buf;
 struct timeb ms_clock;
 
-#ifndef NO_GRAPHICS
-SDL_AudioSpec sdl_audio = {44100, AUDIO_U8, 1, 0, 128};
-SDL_Surface *sdl_screen;
-SDL_Event sdl_event;
-unsigned short vid_addr_lookup[VIDEO_RAM_SIZE],
-    cga_colors[4] = {0 /* Black */, 0x1F1F /* Cyan */, 0xE3E3 /* Magenta */,
-                     0xFFFF /* White */};
-#endif
-
 // Helper functions
 
 // Set carry flag
@@ -310,17 +297,6 @@ int AAA_AAS(char which_operation) {
           regs8[REG_AL] &= 0x0F);
 }
 
-#ifndef NO_GRAPHICS
-void audio_callback(void *data, unsigned char *stream, int len) {
-  for (int i = 0; i < len; i++)
-    stream[i] =
-        (spkr_en == 3) && CAST(unsigned short) mem[0x4AA]
-            ? -((54 * wave_counter++ / CAST(unsigned short) mem[0x4AA]) & 1)
-            : sdl_audio.silence;
-
-  spkr_en = io_ports[0x61] & 3;
-}
-#endif
 
 typedef unsigned short (*io_handler)(unsigned short, int dir);
 
@@ -352,8 +328,6 @@ int main(int argc, char **argv) {
     argv++;
     argc--;
   }
-
-  // memset(mem, 0xFF, RAM_SIZE);
 
   // regs16 and reg8 point to E000:0, the start of memory-mapped registers. CS
   // is initialised to FFFF
@@ -387,23 +361,10 @@ int main(int argc, char **argv) {
   regs16[REG_CS] = 0xFFFF;
   reg_ip = 0x0000;
 
-  /*
-        // Load instruction decoding helper table
-        for (int i = 0; i < 20; i++)
-                for (int j = 0; j < 256; j++)
-                        bios_table_lookup[i][j] = regs8[regs16[0x81 + i] + j];
-
-
-        for (int i = 0; i < 20; i++)
-                for (int j = 0; j < 256; j++)
-      printf("%d %d: %02x\n", i, j, bios_table_lookup[i][j]);
-
-      return 0;
-      */
-
   // Instruction execution loop. Terminates if CS:IP = 0:0
   for (; opcode_stream = mem + 16 * regs16[REG_CS] + reg_ip,
          opcode_stream != mem;) {
+
     if (debug) {
       printf("CS:IP=%05x ", 16 * regs16[REG_CS] + reg_ip);
       printf("opcode = %02x ", *opcode_stream);
@@ -688,7 +649,7 @@ int main(int argc, char **argv) {
                  SEGREG(REG_ES, REG_DI, )),
               extra || INDEX_INC(REG_SI), INDEX_INC(REG_DI),
               rep_override_en &&
-                  !(--regs16[REG_CX] && (!op_result == rep_mode)) &&
+                  !(--regs16[REG_CX] && ((!op_result) == rep_mode)) &&
                   (scratch_uint = 0);
         }
 
@@ -707,6 +668,8 @@ int main(int argc, char **argv) {
         regs16[REG_SP] +=
             i_data0 OPCODE 20 :  // MOV r/m, immed
                                  R_M_OP(mem[op_from_addr], =, i_data2);
+
+      // IN
       OPCODE 21 :                         // IN AL/AX, DX/imm8
                    io_ports[0x20] = 0;    // PIC EOI
       io_ports[0x42] = --io_ports[0x40];  // PIT channel 0/2 read placeholder
@@ -716,51 +679,24 @@ int main(int argc, char **argv) {
       {
         io_handler h = io_handlers[scratch_uint];
 
-        unsigned short value = 0;
         if (h != NULL) {
-          // printf("IN %02x \n", scratch_uint);
-          value = h(scratch_uint, 0);
+          io_ports[scratch_uint] = h(scratch_uint, 0);
         }
-        R_M_OP(regs8[REG_AL], =, value);
+        R_M_OP(regs8[REG_AL], =, io_ports[scratch_uint]);
       }
+
+      // OUT
       OPCODE 22 :  // OUT DX/imm8, AL/AX
                    scratch_uint =
                        extra ? regs16[REG_DX] : (unsigned char)i_data0;
 
       R_M_OP(io_ports[scratch_uint], =, regs8[REG_AL]);
       {
-        unsigned char v = io_ports[scratch_uint];
-        // printf("OUT %02x, %02x: '%c'\n", scratch_uint, v, v);
         io_handler h = io_handlers[scratch_uint];
         if (h != NULL) {
           h(scratch_uint, 1);
         }
       }
-
-      /*
-      scratch_uint == 0x61 &&
-          (io_hi_lo = 0, spkr_en |= regs8[REG_AL] & 3);  // Speaker control
-      (scratch_uint == 0x40 || scratch_uint == 0x42) && (io_ports[0x43] & 6) &&
-          (mem[0x469 + scratch_uint - (io_hi_lo ^= 1)] =
-               regs8[REG_AL]);  // PIT rate programming
-      scratch_uint == 0x3D5 && (io_ports[0x3D4] >> 1 == 6) &&
-          (mem[0x4AD + !(io_ports[0x3D4] & 1)] =
-               regs8[REG_AL]);  // CRT video RAM start offset
-      scratch_uint == 0x3D5 && (io_ports[0x3D4] >> 1 == 7) &&
-          (scratch2_uint =
-               ((mem[0x49E] * 80 + mem[0x49D] + CAST(short) mem[0x4AD]) &
-                (io_ports[0x3D4] & 1 ? 0xFF00 : 0xFF)) +
-               (regs8[REG_AL] << (io_ports[0x3D4] & 1 ? 0 : 8)) -
-               CAST(short) mem[0x4AD],
-           mem[0x49D] = scratch2_uint % 80,
-           mem[0x49E] = scratch2_uint / 80);  // CRT cursor position
-      scratch_uint == 0x3B5 && io_ports[0x3B4] == 1 &&
-          (GRAPHICS_X =
-               regs8[REG_AL] * 16);  // Hercules resolution reprogramming.
-                                     // Defaults are set in the BIOS
-      scratch_uint == 0x3B5 && io_ports[0x3B4] == 6 &&
-          (GRAPHICS_Y = regs8[REG_AL] * 4);
-          */
 
       OPCODE 23 :  // REPxx
                    rep_override_en = 2;

@@ -40,15 +40,22 @@ start:
 	mov al,0x05
 	out post_reg,al
 
-
-
+	;; print hello world
 	mov si, msg_hello
 	call print
 
+	mov ax, 0xFF
+	shift_left ax, 8 ;; macro!
+	call print_hex
+
+
+	m_putc 0x0a ;; macro!
 
 	;; shutdown (EMU specific)
+	;;    the emulator looks for instruction access at NULL (first byte)
+	;;    to shutdown, so we jump to there with CS=0x0000 and IP=0x0000
+	;;    so the next instruction is loaded from 0x00000
 	jmp 0x0:0
-
 
 
 ;; ----------------------------------------------------
@@ -76,7 +83,9 @@ print:
 	lodsb
 	or al, al    ;; check if al is zero (null terminated)
 	jz .exit
-	out 0xFF, al ;; print to the special 0xFF port that is in the Emulator
+
+
+	m_putc ax
 	inc cx       ;; increment counter
 	jmp .print_next
 
@@ -88,4 +97,63 @@ print:
 	pop	cx
 	pop	bx
 	popf ;; pop the flags
+	ret
+
+
+;; inputs:
+;;   ax - word to print as hex (16 bits)
+;; outputs:
+;;   none
+print_hex:
+	xchg	al,ah
+	call	print_byte		; print the upper byte
+	xchg	al,ah
+	call	print_byte		; print the lower byte
+	ret
+
+;=========================================================================
+; print_byte - print a byte in hexadecimal
+; Input:
+;	AL - byte to print
+; Output:
+;	none
+;-------------------------------------------------------------------------
+print_byte:
+	rotate_left al, 4 ;; macro!
+	call print_digit
+	rotate_left al, 4 ;; macro!
+	call print_digit
+	ret
+
+	;=========================================================================
+; print_digit - print hexadecimal digit
+; Input:
+;	AL - bits 3...0 - digit to print (0...F)
+; Output:
+;	none
+;-------------------------------------------------------------------------
+print_digit:
+	push ax
+	push bx
+	push si
+	and al, 0x0F    ; make sure its only the lower nibble
+	add al,'0'			; convert to ASCII
+	cmp al,'9'			; less or equal 9?
+	jna .do_print
+	add al,'A'-'9'-1		; a hex digit
+
+.do_print:
+	m_putc ax
+
+	pop si
+	pop bx
+	pop ax
+	ret
+
+;; 
+putc:
+	push ax
+	mov ax, si
+	out 0xFF, al ;; print to the special 0xFF port that is in the Emulator
+	pop ax
 	ret
